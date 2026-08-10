@@ -441,6 +441,7 @@ app.layout = dmc.MantineProvider(dbc.Container(fluid=True, className='bg-gray-10
                    dcc.Store(id='store-obs-params', data=None),
                    # Persists the user's list of target source specs (strings) across reloads.
                    dcc.Store(id='store-targets', data=[], storage_type='local'),
+                   dcc.Store(id='suppress-network-antenna-update', data=False),
                    # Hidden compute button (needed for callback compatibility but not shown)
                    html.Div(html.Button(id='compute-observation', style={'display': 'none'})),
                    layout.top_banner(app),

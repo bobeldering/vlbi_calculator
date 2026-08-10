@@ -414,14 +414,16 @@ def update_group_chip_appearance(active_codename, is_selected, band_index, do_e_
 @callback(
     [Output('switches-antennas', 'value', allow_duplicate=True)] +
     [Output({'type': 'group-is-selected', 'index': gname}, 'data', allow_duplicate=True)
-     for gname in inputs.station_groups()],
+     for gname in inputs.station_groups()] +
+    [Output('suppress-network-antenna-update', 'data', allow_duplicate=True)],
     Input({'type': 'network-switch', 'index': ALL}, 'value'),
     [State('switches-antennas', 'value')] +
+    [State('suppress-network-antenna-update', 'data')] +
     [State({'type': 'group-active-codename', 'index': gname}, 'data')
      for gname in inputs.station_groups()],
     prevent_initial_call=True
 )
-def update_selected_antennas_from_networks(networks, current_antennas, *group_active_codenames):
+def update_selected_antennas_from_networks(networks, current_antennas, suppress_flag, *group_active_codenames):
     """When a network switch is toggled, update both the ungrouped chip selection and
     the is-selected state for each grouped antenna whose active codename is in the network.
 
@@ -431,13 +433,15 @@ def update_selected_antennas_from_networks(networks, current_antennas, *group_ac
         Network selection states.
     current_antennas : list
         Currently selected antenna codenames.
+    suppress_flag : bool
+        Flag to suppress network antenna updates.
     *group_active_codenames : str
         Active codenames for all groups.
 
     Returns
     -------
     list
-        [new_antenna_list] + group_selected_states.
+        [new_antenna_list] + group_selected_states + [suppress_flag].
     """
     current_antennas = set(current_antennas)
     ants2include = set()
@@ -450,7 +454,6 @@ def update_selected_antennas_from_networks(networks, current_antennas, *group_ac
             ants2exclude.update(network.station_codenames)
 
     ants2exclude -= ants2include
-    new_antennas = current_antennas - ants2exclude | ants2include
 
     group_selected_states = []
     for active_codename in group_active_codenames:
@@ -462,7 +465,13 @@ def update_selected_antennas_from_networks(networks, current_antennas, *group_ac
             # No network touched this group's active config — keep current state
             group_selected_states.append(no_update)
 
-    return [list(new_antennas)] + group_selected_states
+    # When url_open sets the suppress flag, preserve the switches-antennas value
+    # that url_open already set instead of overriding it. Reset the flag to False.
+    if suppress_flag:
+        return [no_update] + group_selected_states + [False]
+
+    new_antennas = current_antennas - ants2exclude | ants2include
+    return [list(new_antennas)] + group_selected_states + [no_update]
 
 
 # NOTE: The epoch date/time fields (`epoch-selection-div`) are ALWAYS visible now.
@@ -876,20 +885,31 @@ clientside_callback(
     [Output(e.id, e.property) for e in export_component_id_properties],
     # delete targetversion and config from the url parameters after parsing it
     Output('url', 'href'),
-    Input('url', 'href')
+    Output('suppress-network-antenna-update', 'data'),
+    Input('url', 'href'),
+    [State({'type': 'network-switch', 'index': network_name}, 'value')
+     for network_name in observation._NETWORKS],
     )
-def url_open(href):
+def url_open(href, *current_network_switches):
     """Parse URL parameters to restore configuration from Polaris.
 
     Parameters
     ----------
     href : str
         URL with targetversion and config parameters.
+    *current_network_switches : bool
+        Current values of all network-switch components, used to detect whether
+        the URL config actually changes any network-switch value.
 
     Returns
     -------
     tuple
-        (component_values, cleaned_url) for all export_component_ids.
+        (component_values, cleaned_url, suppress_flag).
+        component_values: list of component values for all export_component_ids.
+        cleaned_url: URL with targetversion and config parameters removed.
+        suppress_flag: True when at least one network-switch value changes,
+        signalling ``update_selected_antennas_from_networks`` not to override the
+        antenna selection set by this callback.
     """
     parsed_href = furl(href)
     target_version = parsed_href.args.get('targetversion')
@@ -907,15 +927,31 @@ def url_open(href):
     if target_version is not None and target_version > current_version:
         # current running version too old??
         raise PreventUpdate
+    network_switch_ids = [
+        {'type': 'network-switch', 'index': network_name}
+        for network_name in observation._NETWORKS
+    ]
     update_list = []
+    # need to inform the callback that updates the antennas based on network switches changes
+    # (if any) to suppress it from overriding the antenna selection that are set here
+    suppress = False
     for component in export_component_id_properties:
         try:
             index = id_list.index(component.id)
-            update_list.append(value_list[index])
+            new_val = value_list[index]
+            if component.id in network_switch_ids:
+                ns_idx = network_switch_ids.index(component.id)
+                if new_val != current_network_switches[ns_idx]:
+                    suppress = True
+                    update_list.append(new_val)
+                else:
+                    update_list.append(no_update)
+            else:
+                update_list.append(new_val)
         except ValueError:
             update_list.append(no_update)
     if target_version is not None:
         del parsed_href.args['targetversion']
     if config is not None:
         del parsed_href.args['config']
-    return update_list + [parsed_href.url]
+    return update_list + [parsed_href.url, suppress]
